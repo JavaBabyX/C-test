@@ -1,150 +1,153 @@
-#include "helpers.h"
-
+#include <getopt.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-void copy(int height, int width, RGBTRIPLE source[height][width], RGBTRIPLE destination[height][width])
+#include "helpers.h"
+
+int main(int argc, char *argv[])
 {
-    for (int x = 0; x < width; x++)
+    // Define allowable filters
+    char *filters = "begr";
+
+    // Get filter flag and check validity
+    char filter = getopt(argc, argv, filters);
+    if (filter == '?')
     {
-        for (int y = 0; y < height; y++)
-        {
-            destination[x][y] = source[x][y];
-        }
+        printf("Invalid filter.\n");
+        return 1;
     }
-}
 
-// Convert image to grayscale
-void grayscale(int height, int width, RGBTRIPLE image[height][width])
-{
+    // Ensure only one filter
+    if (getopt(argc, argv, filters) != -1)
+    {
+        printf("Only one filter allowed.\n");
+        return 2;
+    }
+
+    // Ensure proper usage
+    if (argc != optind + 2)
+    {
+        printf("Usage: ./filter [flag] infile outfile\n");
+        return 3;
+    }
+
+    // Remember filenames
+    char *infile = argv[optind];
+    char *outfile = argv[optind + 1];
+
+    // Open input file
+    FILE *inptr = fopen(infile, "r");
+    if (inptr == NULL)
+    {
+        printf("Could not open %s.\n", infile);
+        return 4;
+    }
+
+    // Open output file
+    FILE *outptr = fopen(outfile, "w");
+    if (outptr == NULL)
+    {
+        fclose(inptr);
+        printf("Could not create %s.\n", outfile);
+        return 5;
+    }
+
+    // Read infile's BITMAPFILEHEADER
+    BITMAPFILEHEADER bf;
+    fread(&bf, sizeof(BITMAPFILEHEADER), 1, inptr);
+
+    // Read infile's BITMAPINFOHEADER
+    BITMAPINFOHEADER bi;
+    fread(&bi, sizeof(BITMAPINFOHEADER), 1, inptr);
+
+    // Ensure infile is (likely) a 24-bit uncompressed BMP 4.0
+    if (bf.bfType != 0x4d42 || bf.bfOffBits != 54 || bi.biSize != 40 ||
+        bi.biBitCount != 24 || bi.biCompression != 0)
+    {
+        fclose(outptr);
+        fclose(inptr);
+        printf("Unsupported file format.\n");
+        return 6;
+    }
+
+    // Get image's dimensions
+    int height = abs(bi.biHeight);
+    int width = bi.biWidth;
+
+    // Allocate memory for image
+    RGBTRIPLE(*image)[width] = calloc(height, width * sizeof(RGBTRIPLE[width])); //rgbtrip width
+    if (image == NULL)
+    {
+        printf("Not enough memory to store image.\n");
+        fclose(outptr);
+        fclose(inptr);
+        return 7;
+    }
+
+    // Determine padding for scanlines
+    int padding = (4 - (width * sizeof(RGBTRIPLE)) % 4) % 4;
+
+    // Iterate over infile's scanlines
     for (int i = 0; i < height; i++)
     {
-        for (int j = 0; j < width; j++)
-        {
-            // Calculate average of red, green, and blue values
-            int average = round((image[i][j].rgbtRed + image[i][j].rgbtGreen + image[i][j].rgbtBlue) / 3.0);
+        // Read row into pixel array
+        fread(image[i], sizeof(RGBTRIPLE), width, inptr);
 
-            // Set red, green, and blue values to the calculated average
-            image[i][j].rgbtRed = average;
-            image[i][j].rgbtGreen = average;
-            image[i][j].rgbtBlue = average;
-        }
+        // Skip over padding
+        fseek(inptr, padding, SEEK_CUR);
     }
-}
 
-// Reflect image horizontally
-void reflect(int height, int width, RGBTRIPLE image[height][width])
-{
+    // Filter image
+    switch (filter)
+    {
+        // Blur
+        case 'b':
+            blur(height, width, image);
+            break;
+
+        // Edges
+        case 'e':
+            edges(height, width, image);
+            break;
+
+        // Grayscale
+        case 'g':
+            grayscale(height, width, image);
+            break;
+
+        // Reflect
+        case 'r':
+            reflect(height, width, image);
+            break;
+    }
+
+    // Write outfile's BITMAPFILEHEADER
+    fwrite(&bf, sizeof(BITMAPFILEHEADER), 1, outptr);
+
+    // Write outfile's BITMAPINFOHEADER
+    fwrite(&bi, sizeof(BITMAPINFOHEADER), 1, outptr);
+
+    // Write new pixels to outfile
     for (int i = 0; i < height; i++)
     {
-        for (int j = 0; j < width / 2; j++)
+        // Write row to outfile
+        fwrite(image[i], sizeof(RGBTRIPLE), width, outptr);
+
+        // Write padding at end of row
+        for (int k = 0; k < padding; k++)
         {
-            // Swap pixels on the left side with pixels on the right side
-            RGBTRIPLE temp = image[i][j];
-            image[i][j] = image[i][width - 1 - j];
-            image[i][width - 1 - j] = temp;
+            fputc(0x00, outptr);
         }
     }
+
+    // Free memory for image
+    free(image);
+
+    // Close files
+    fclose(inptr);
+    fclose(outptr);
+    return 0;
 }
 
-// Blur image
-void blur(int height, int width, RGBTRIPLE image[height][width])
-{
 
-    RGBTRIPLE(*copy)[width] = calloc(height, width * sizeof(RGBTRIPLE));
-    if (copy == NULL)
-    {
-        printf("Not enough memory to store copy of image.\n");
-        return;
-    }
-
-    for (int x = 0; x < width; x++)
-    {
-        for (int y = 0; y < height; y++)
-        {
-            int redSum = 0;
-            int greenSum = 0;
-            int blueSum = 0;
-            int count = 0;
-
-            for (int i = -1; i <= 1; i++)
-            {
-                for (int j = -1; j <= 1; j++)
-                {
-                    if (x + i >= 0 && x + i < width && y + j >= 0 && y + j < height)
-                    {
-                        redSum += image[x + i][y + j].rgbtRed;
-                        greenSum += image[x + i][y + j].rgbtGreen;
-                        blueSum += image[x + i][y + j].rgbtBlue;
-                        count++;
-                    }
-                }
-            }
-
-            copy[x][y].rgbtRed = round((float) redSum / count);
-            copy[x][y].rgbtGreen = round((float) greenSum / count);
-            copy[x][y].rgbtBlue = round((float) blueSum / count);
-        }
-    }
-
-    for (int x = 0; x < width; x++)
-    {
-        for (int y = 0; y < height; y++)
-        {
-            image[x][y] = copy[x][y];
-        }
-    }
-
-    free(copy);
-    return;
-}
-
-// Detect edges
-void edges(int height, int width, RGBTRIPLE image[height][width])
-{
-    RGBTRIPLE temp[height][width];
-    memcpy(temp, image, sizeof(RGBTRIPLE) * height * width);
-
-    int gx[3][3] = {{-1, 0, 1}, {-2, 0, 2}, {-1, 0, 1}};
-    int gy[3][3] = {{-1, -2, -1}, {0, 0, 0}, {1, 2, 1}};
-
-    for (int i = 0; i < height; i++)
-    {
-        for (int j = 0; j < width; j++)
-        {
-            int gxRed = 0, gxGreen = 0, gxBlue = 0;
-            int gyRed = 0, gyGreen = 0, gyBlue = 0;
-
-            for (int k = -1; k <= 1; k++)
-            {
-                for (int l = -1; l <= 1; l++)
-                {
-                    int ni = i + k;
-                    int nj = j + l;
-
-                    if (ni >= 0 && ni < height && nj >= 0 && nj < width)
-                    {
-                        gxRed += temp[ni][nj].rgbtRed * gx[k + 1][l + 1];
-                        gxGreen += temp[ni][nj].rgbtGreen * gx[k + 1][l + 1];
-                        gxBlue += temp[ni][nj].rgbtBlue * gx[k + 1][l + 1];
-
-                        gyRed += temp[ni][nj].rgbtRed * gy[k + 1][l + 1];
-                        gyGreen += temp[ni][nj].rgbtGreen * gy[k + 1][l + 1];
-                        gyBlue += temp[ni][nj].rgbtBlue * gy[k + 1][l + 1];
-                    }
-                }
-            }
-
-            int finalRed = round(sqrt(gxRed * gxRed + gyRed * gyRed));
-            int finalGreen = round(sqrt(gxGreen * gxGreen + gyGreen * gyGreen));
-            int finalBlue = round(sqrt(gxBlue * gxBlue + gyBlue * gyBlue));
-
-            image[i][j].rgbtRed = finalRed > 255 ? 255 : finalRed;
-            image[i][j].rgbtGreen = finalGreen > 255 ? 255 : finalGreen;
-            image[i][j].rgbtBlue = finalBlue > 255 ? 255 : finalBlue;
-        }
-    }
-    return;
-}
